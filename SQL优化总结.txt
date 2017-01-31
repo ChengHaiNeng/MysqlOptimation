@@ -1,0 +1,44 @@
+SQL 优化
+#一.建表
+	①定长与变长分离：I . int 4个字节 char 1个字节 smallint 2个字节  tinyint 1个字节 date/time 定长 II .varchar,text,blob是不定长
+	 定长的话，每一行固定，找数据时候位置相对固定，速度会比较快一点	
+	②常用与不常用字段分离
+	③冗余字段的应用
+#二.列的选择
+	①字段类型优先级:整形>date,time>enum,char>varchar>blob,text(无法使用内存临时表，只能在磁盘进行，排序太慢)
+	 I . int不需要字符集，orderby排序，计算会比char快，char需要考虑字符集和校队集
+	 II . date/time 定长，运算也很快， 需要考虑时区 where>"2017-01-01"，写sql时候不是很方便，存成unsigned，能存到2038年左右
+	 III . enum 内部转成整形，与char类型联查时候,where gender ="男" => where gender="3" 
+	 IV . varchar 不定长：表联查时候，varchar(300)比varchar(30)花更多内存
+	②够用就行，不用慷慨：
+	③避免用null : I .在磁盘上占据的空间实际更大，要特别标注是null，5.7已经有优化. II .如果用了它，那就只能用 is null ,is not null 来使唤它了，不利于索引、查询
+
+#三.SQL语句优化
+1.不查，“假”数据，根据业务逻辑用程序算出来的数据返回显示
+2.少查，①分次查：10000次分10次查或100次查，你一次返回回去客户又不看②尽量查只需要的一些列，不要全部查出来
+3.查的快，①优化索引：索引覆盖（根据业务逻辑和sql日志实际运行情况，尽量查到的数据都被索引所覆盖）、索引长度（3-4个汉字、字符比较的合适，能达到接近95%-100%的区分度）、组合索引（尊崇左前缀原则，必要时候添加尽可能多的冗余索引≠重复索引）。
+		  ②关于索引查询时候的排序：I . Myisam索引排序时候：如果查的字段有排序用的索引未包含的字段，则先全部查出，再排序，所以会用filesort,tmp文件。所以InnoDB会更好。
+		  II .InnoDB索引排序时候：如果查询的字段有用的索引未包含的字段，则查出一个，排序，再查出一个，再排序、
+	其他关于索引的知识:①Btree二叉树索引（查询连续的比较方便） 与 hash索引（查询单个的比较方便，海量数据容易重复）
+					   ②聚簇索引--InnoDB,非聚簇索引--Myisam
+					   ③伪哈希索引：crc32(),将字段转换为一个整形
+					   ④索引碎片维护:I .alter table engine Myisam/InnoDB
+									 II .optimize table 表名
+					   ⑤大量插入不规则主键：容易造成InnoDB的页分裂，因为InnoDB数据是挂在主键索引上的，插入不规则数据，插入时候带着数据来回移动保持二叉树极为耗时。不如用Myisam引擎。
+					   ⑥一个问题：为什么用的InnoDB，order by id ,比order by (id,ver)费时？
+									答：因为单独orderby 主键，主键底下是挂着数据的；而index(id,ver)只是一颗索引树
+
+#In型子查询陷阱：select goods_id,cat_id,goods_name from goods where cat_id in (select cat_id from category where parent_id = 6);
+				=>select * from cat where cat_id = 3 and parent_id = 6;
+				In型子查询：外层挨个全部查出,每一条的goods取出cat_id去category表查出parent_id去跟内层category去核对parent_id是否=6
+				连接查询代替子查询:select goods_id,cat_id,goods_name from goods inner join (select cat_id from category where parent_id = 6) as tmp  on goods.cat_id = tmp.cat_id
+				先查出select cat_id from category where parent_id = 6 的cat_id结果集，然后用cat_id做索引去goods表中查
+				
+#exist型与from型子查询 : Exist型子查询： select * from category where exists (select * from goods where goods.cat_id = category.cat_id)
+						 category逐行查询，去内层比对，如果有，就留着，没有，就扔掉，类似于In型子查询
+						 From型子查询: 内层查到的数据在内存中形成临时表，没有索引，返回给外层，内层返回的数据尽量少，如果需要排序，在内层排，内层是表，可以用索引排序
+#GroupBy : 1.不适合用来去重，否则也会使用临时表，适合用来统计平均分之类的 2.跟OrderBy一样，也需要索引覆盖
+#Union :1.union会产生临时表，union字句尽量具体，查询更少的行 2.去重就得排序，尽量用union all，在php中去重
+#Limit分页优化 ： 全部查出来offset+N条，并不是跳过offset
+				  替代方案 : where id>1000000 limit 10, 如果删除过 ，有“洞”，就对不上号了
+				  替代方案2 : select id,name from 表名 inner join (select id from 表名 limit 1000000,5) as tmp on 表名.id as tmp.id
